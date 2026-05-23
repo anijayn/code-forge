@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:18
+    container_name: codeforge-db
+    restart: always # restarts container automatically on exit. important for critical services
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB} # postgres creates a default db with this name
+    ports:
+      - "5432:5432" #LHS:RHS -> Local port: Container port
+
+  redis:
+    image: redis:8.6-alpine
+    container_name: codeforge-redis
+    restart: always
+    ports:
+      - "6379:6379"

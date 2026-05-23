@@ -1,0 +1,19 @@
+{
+  "name": "codeforge",
+  "private": true,
+  "workspaces": [
+    "anvil",
+    "forge"
+  ],
+  "scripts": {
+    "prepare": "husky",
+    "lint-staged": "lint-staged",
+    "lint": "npm run lint --workspaces",
+    "type-check": "npm run type-check --workspaces"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "prettier --write"
+    ]
+  }
+}
