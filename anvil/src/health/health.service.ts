@@ -1,9 +1,15 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 
 @Injectable()
 export class HealthService {
+  // @InjectDataSource tells Nest to inject the already initialized TypeORM datasource
+  // created with git TypeOrmModule.forRootAsync()
+  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
   async getHealth() {
     try {
+      await this.dataSource.query('SELECT 1');
       return {
         success: true,
         statusCode: HttpStatus.OK,
