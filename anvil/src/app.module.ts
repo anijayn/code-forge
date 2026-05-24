@@ -10,10 +10,14 @@ import { Workspace } from './db/entities/workspace.entity';
 import { PullRequest } from './db/entities/pull-request.entity';
 import { Analysis } from './db/entities/analysis.entity';
 import { AnalysisJob } from './db/entities/analysis-job.entity';
+import { BullQueueModule } from './worker/bull-queue.module';
+import { WorkerModule } from './worker/worker.module';
+import { LoggerModule } from './logger/logger.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    LoggerModule,
     TypeOrmModule.forRootAsync({
       // forRootAsync + imports ensures ConfigModule is resolvable when factory runs
       // imports: [ConfigModule],
@@ -35,6 +39,8 @@ import { AnalysisJob } from './db/entities/analysis-job.entity';
         logging: true, // see SQL in terminal during development
       }),
     }),
+    BullQueueModule,
+    WorkerModule,
     HealthModule,
   ],
   controllers: [AppController, HealthController],
