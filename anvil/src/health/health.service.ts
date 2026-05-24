@@ -1,15 +1,9 @@
 import { HttpStatus, Injectable } from '@nestjs/common';
-import { sql } from 'drizzle-orm';
-import { DrizzleService } from '../db/drizzle.service';
 
 @Injectable()
 export class HealthService {
-  constructor(private readonly drizzle: DrizzleService) {}
-
   async getHealth() {
     try {
-      await this.drizzle.db.execute(sql`SELECT 1`);
-
       return {
         success: true,
         statusCode: HttpStatus.OK,
