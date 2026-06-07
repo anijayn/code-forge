@@ -1,22 +1,5 @@
 import type { PullRequestFile } from '../integrations/github/github.types';
-
-export interface AddedLine {
-  lineNumber: number;
-  content: string;
-}
-
-export interface ParsedDiff {
-  filename: string;
-  status: string;
-  additions: number;
-  deletions: number;
-  addedLines: AddedLine[];
-}
-
-export interface DiffChunk {
-  files: ParsedDiff[];
-  tokenEstimate: number;
-}
+import { AddedLine, DiffChunk, ParsedDiff } from './types';
 
 const CHARS_PER_TOKEN = 4;
 const MAX_TOKENS_PER_CHUNK = 4000;

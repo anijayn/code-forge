@@ -1,44 +1,150 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { Job } from 'bullmq';
-import { AppLogger } from '../logger/logger.service';
+import { GitHubService } from '../integrations/github/github.service';
 import { QUEUES } from './constants';
-import { GithubService } from '../integrations/github/github.service';
+import { parseDiff, chunkDiff } from '../analysis/analysis.utils';
+import { AppLogger } from '../logger/logger.service';
+import { SecurityWorker } from '../analysis/security.worker';
+import { ComplexityWorker } from '../analysis/complexity.worker';
+import { TestGapsWorker } from '../analysis/test-gaps.worker';
+import { BreakingWorker } from '../analysis/breaking.worker';
+import { computeQualityScore } from '../analysis/scorer';
+import { PullRequest } from '../db/entities/pull-request.entity';
+import { Analysis } from '../db/entities/analysis.entity';
+import { Finding } from '../analysis/types';
+import { WorkflowStatus } from '../db/types';
 import { PrJobPayload } from './types';
-import { chunkDiff, parseDiff } from '../analysis/analysis.utils';
 
-// Registers class as BullMQ Worker that listens to the specified queue
-// Automatically executes process() whenever job is added to queue
 @Processor(QUEUES.ANALYZE_PR)
 export class AnalysisWorkerService extends WorkerHost {
   constructor(
-    private readonly logger: AppLogger,
-    private readonly githubService: GithubService,
+    private readonly githubService: GitHubService,
+    private readonly loggerService: AppLogger,
+    private readonly securityWorker: SecurityWorker,
+    private readonly complexityWorker: ComplexityWorker,
+    private readonly testGapsWorker: TestGapsWorker,
+    private readonly breakingWorker: BreakingWorker,
+    @InjectRepository(PullRequest)
+    private readonly prRepo: Repository<PullRequest>,
+    @InjectRepository(Analysis)
+    private readonly analysisRepo: Repository<Analysis>,
   ) {
-    // This is required in all derived classes. It calls the constructor
-    // of the parent class, so child class can use 'this' object
     super();
   }
+
   async process(job: Job<PrJobPayload>): Promise<void> {
     const {
-      data: { prNumber, repoFullName, headSha },
-      id,
-    } = job;
-    this.logger.log(`Picked up job ${id}`);
-    this.logger.log(`PR: #${job.data.prNumber} in ${repoFullName}`);
-    this.logger.log(`Head SHA: ${headSha}`);
-
-    const files = await this.githubService.getPullRequestFiles(
-      repoFullName,
+      githubPrId,
       prNumber,
+      repoFullName,
+      headSha,
+      baseBranch,
+      title,
+      author,
+    } = job.data;
+
+    this.loggerService.log(
+      `Job ${job.id} started — PR #${prNumber} in ${repoFullName}`,
+    );
+    this.loggerService.log(`Head SHA: ${headSha}`);
+
+    // 1. upsert pull request record
+    const pr = await this.prRepo.save(
+      this.prRepo.create({
+        githubPrId: githubPrId ?? prNumber,
+        githubPrNumber: prNumber,
+        repoFullName,
+        headSha,
+        baseBranch,
+        title,
+        author,
+        workflowStatus: WorkflowStatus.ANALYZING,
+      }),
     );
 
-    const parsedDiff = parseDiff(files);
-    const chunks = chunkDiff(parsedDiff);
+    try {
+      // 2. fetch diff
+      const files = await this.githubService.getPrFiles(repoFullName, prNumber);
 
-    this.logger.log(`Fetched ${files.length} file(s)`);
-    this.logger.log(`Parsed ${parsedDiff.length} diff hunks`);
-    this.logger.log(`Split into ${chunks.length} chunk(s)`);
+      // 3. parse + chunk
+      const hunks = parseDiff(files);
+      const chunks = chunkDiff(hunks);
+      this.loggerService.log(
+        `${files.length} files → ${hunks.length} hunks → ${chunks.length} chunk(s)`,
+      );
 
-    this.logger.log(`Job ${job.id} complete`);
+      // 4. run all 4 workers in parallel
+      const [security, complexity, testGaps, breaking] =
+        await Promise.allSettled([
+          this.securityWorker.analyze(chunks),
+          this.complexityWorker.analyze(chunks),
+          this.testGapsWorker.analyze(chunks),
+          this.breakingWorker.analyze(chunks, files),
+        ]);
+
+      // 5. collect findings — partial results if any worker failed
+      const allFindings: Finding[] = [
+        security,
+        complexity,
+        testGaps,
+        breaking,
+      ].flatMap((result) => {
+        if (result.status === 'fulfilled') {
+          return result.value.findings.map((f) => ({
+            ...f,
+            workerType: result.value.workerType,
+          }));
+        }
+        this.loggerService.warn(`Worker failed: ${String(result.reason)}`);
+        return [];
+      });
+
+      this.loggerService.log(`Total findings: ${allFindings.length}`);
+
+      // 6. compute quality score
+      const qualityScore = computeQualityScore(allFindings);
+      this.loggerService.log(`Quality score: ${qualityScore}/100`);
+
+      // 7. save findings to Postgres
+      if (allFindings.length > 0) {
+        const findingEntities = allFindings.map((f) =>
+          this.analysisRepo.create({
+            pullRequest: pr,
+            analysisType: f.workerType,
+            filePath: f.file,
+            lineNumber: f.line,
+            severity: f.severity,
+            explanation: f.explanation,
+            fixSuggestion: f.fix,
+          }),
+        );
+        await this.analysisRepo.save(findingEntities);
+      }
+
+      // 8. update PR record with score + status
+      await this.prRepo.save({
+        ...pr,
+        workflowStatus: WorkflowStatus.COMPLETE,
+        qualityScore,
+      });
+
+      // 9. post review to GitHub
+      await this.githubService.postReview(
+        repoFullName,
+        prNumber,
+        allFindings,
+        qualityScore,
+      );
+
+      this.loggerService.log(
+        `Job ${job.id} complete — score: ${qualityScore}/100`,
+      );
+    } catch (error) {
+      await this.prRepo.save({ ...pr, workflowStatus: WorkflowStatus.FAILED });
+      this.loggerService.error(`Job ${job.id} failed`, String(error));
+      throw error;
+    }
   }
 }
